@@ -1,0 +1,79 @@
+name: Verify prefix-pattern fix before upstream submission
+
+on:
+  push:
+    branches:
+      - verify/mloda2326-tox-20261026
+
+permissions:
+  contents: read
+
+jobs:
+  full-tox:
+    if: >-
+      github.repository == 'sunxiuguo/mloda' &&
+      github.ref == 'refs/heads/verify/mloda2326-tox-20261026' &&
+      github.event.head_commit.message == 'ci: verify mloda 2326 candidate' &&
+      github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTEST_WORKERS: '3'
+      UV_FROZEN: 'true'
+      UV_NO_CACHE: 'true'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - name: Check out the selected candidate branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, verified 2026-10-26
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5, verified 2026-10-26
+        with:
+          python-version: '3.11'
+      - name: Verify exact reviewed candidate and unchanged lock
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          import subprocess
+
+          base = '8377f7107a58b7fcb2dbeae2c60669d417d795ef'
+          expected = {
+              'mloda/core/abstract_plugins/feature_group.py': '3e4c7e9779391d66edbf66addefc6d2eb7545ba6965b671fc8937ddde884e4db',
+              'tests/test_core/test_prepare/test_overridden_pattern_bindings.py': '122336fb1e6ca8f5d8c4385a8c4d9de37f650b4aff1dbab370eef07fdb55e889',
+              'uv.lock': '1d305a8a984c472c7771d14487041145cc0adef6ff369713bf0489b23938d99d',
+          }
+          subprocess.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
+          changed = set(subprocess.check_output(
+              ['git', 'diff', '--name-only', base, 'HEAD'], text=True
+          ).splitlines())
+          allowed = {
+              'mloda/core/abstract_plugins/feature_group.py',
+              'tests/test_core/test_prepare/test_overridden_pattern_bindings.py',
+              '.github/workflows/verify-mloda2326.yml',
+          }
+          if changed != allowed:
+              raise SystemExit(f'Unexpected changed paths: {sorted(changed)}')
+          for filename, sha256 in expected.items():
+              actual = hashlib.sha256(Path(filename).read_bytes()).hexdigest()
+              if actual != sha256:
+                  raise SystemExit(f'Hash mismatch: {filename}: {actual}')
+              print(filename, actual)
+          print('Verified candidate', subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
+          PY
+          cp uv.lock "$RUNNER_TEMP/mloda-uv.lock"
+      - name: Install the pinned official test launcher
+        run: |
+          python -m pip install --no-cache-dir uv==0.13.5
+          uv tool install tox==4.64.1 --with tox-uv==1.36.0 --with uv==0.13.5
+          uv --version
+          tox --version
+      - name: Run the unchanged default tox gate
+        run: tox
+      - name: Verify that the committed lock was not changed
+        if: always()
+        run: |
+          cmp uv.lock "$RUNNER_TEMP/mloda-uv.lock"
+          git diff --exit-code -- uv.lock
